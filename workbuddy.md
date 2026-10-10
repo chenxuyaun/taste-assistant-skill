@@ -35,7 +35,7 @@ WorkBuddy 在受管 venv 安装依赖并跑 pytest：先遇清华镜像缺包（
 用户要求「阅读参赛说明，生成必要文件」。WorkBuddy 抓取比赛仓库 README / 活动规则 /
 `CONTEST_DECLARATION.md`（原样抄）/ 麦当劳 MCP Server 工具清单，识别出硬门槛「必须真实使用麦当劳 MCP」。
 为此**真把麦当劳 MCP 接进推荐引擎**（`recommend/mcd_client.py`：Streamable HTTP 连接 `https://mcp.mcd.cn`，
-调 `query-meals`+`list-nutrition-foods`，4s 超时回退，离线结果明确标注 `offline_demo` 绝不伪造），
+调 `query-meals`（需门店编码，经 `MCD_STORE_CODE` 注入），8s 超时回退，离线结果明确标注 `offline_demo` 绝不伪造），
 并补齐比赛必交文件：
 - `README.md`（项目介绍/安装/使用示例/目标用户）
 - `CONTEST_DECLARATION.md`（官方声明，内容不可改）

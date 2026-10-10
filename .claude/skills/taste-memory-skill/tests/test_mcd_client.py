@@ -19,14 +19,36 @@ def test_guess_allergens_conservative():
     assert "鸡蛋" in mcd_client.guess_allergens("蛋挞")
 
 
-def test_normalize_meals_from_json_text():
-    payload = '{"items": [{"name": "巨无霸", "tags": ["经典"]}, {"name": "麦辣鸡腿堡"}]}'
-    items = mcd_client.normalize_meals(payload)
+def test_normalize_meals_real_mcd_structure():
+    # 麦当劳 query-meals 真实响应结构（data.categories + data.meals + data.frequent）
+    raw = {
+        "success": True, "code": 0,
+        "data": {
+            "categories": [{"name": "汉堡", "meals": [{"code": "C1", "tags": ["经典"]}]}],
+            "meals": {"C1": {"name": "巨无霸", "currentPrice": "24.5", "originalPrice": "28"}},
+            "frequent": {"name": "麦辣鸡腿堡", "tags": ["辣"]},
+        },
+    }
+    items = mcd_client.normalize_meals(raw)
     names = {i["name"] for i in items}
     assert "巨无霸" in names and "麦辣鸡腿堡" in names
-    required = {"name", "dims", "tags", "ingredients", "allergens"}
+    required = {"name", "dims", "tags", "ingredients", "allergens", "price", "original_price"}
     for it in items:
         assert required <= set(it.keys())
+    big = next(i for i in items if i["name"] == "巨无霸")
+    assert big["price"] == "24.5" and big["original_price"] == "28"
+
+
+def test_normalize_meals_from_wrapped_text():
+    # 麦当劳 MCP 把后端响应包成文本 + 末尾 ## Original Response JSON
+    text = (
+        "# API Response Information\n\n## Response Structure\n- **data**: ...\n\n"
+        "## Original Response\n\n"
+        '{"success": true, "code": 0, "data": {"categories": [{"name": "n",'
+        '"meals": [{"code": "X", "tags": []}]}], "meals": {"X": {"name": "薯条"}}}}'
+    )
+    items = mcd_client.normalize_meals(text)
+    assert any(i["name"] == "薯条" for i in items)
 
 
 def test_normalize_meals_empty_returns_empty():

@@ -1,13 +1,21 @@
 """麦当劳 MCP 客户端 —— 比赛资格的真实集成层。
 
-通过 Streamable HTTP 连接 https://mcp.mcd.cn，使用环境变量 ``MCD_MCP_TOKEN`` 鉴权，
-拉取**实时**菜单（query-meals）与营养（list-nutrition-foods），归一化为推荐引擎可用的菜品结构。
+通过原生 JSON-RPC over HTTP（Streamable HTTP 风格）连接 https://mcp.mcd.cn，
+使用环境变量 ``MCD_MCP_TOKEN`` 鉴权，调用真实工具 ``query-meals`` 拉取**实时**菜单。
+
+为什么不用 mcp SDK 的 streamable_http_client（实测结论）：
+- mcp 2.3.0 的 streamable_http_client 进入 context 时会发起 GET 根路径建立 SSE 流，
+  而麦当劳 MCP 服务端 `GET /` 返回 403，导致 anyio TaskGroup 抛 "unhandled errors"、连接失败。
+- 其函数签名也无 headers 参数（需经自定义 httpx.AsyncClient 注入鉴权头）。
+- 故直接用 httpx 发 JSON-RPC（initialize + tools/call），绕开 SDK 的流封装，稳定可用。
 
 设计纪律（对应活动规则「不得静默降级到模拟数据」）：
-- 仅在配置了有效 Token 且连接成功时返回真实麦当劳数据，``source="mcd_mcp"``。
-- 任何连接 / 鉴权 / 超时 / 解析失败都返回 ``None``，由推荐引擎**透明**回退到离线 demo 目录，
-  并在结果里标注 ``source="offline_demo"``，绝不把离线数据伪装成实时麦当劳数据。
-- 口味维度是用「菜名 / 标签 / 营养」推导的**启发式**，代码与文档均如实标注，不声称是官方口味标签。
+- 仅在配置了有效 Token 且 query-meals 成功返回菜单时，返回真实麦当劳数据，source="mcd_mcp"。
+- 任何连接 / 鉴权 / 参数缺失 / 超时 / 解析失败都返回 None，由推荐引擎**透明**回退离线目录，
+  并在结果里标注 source="offline_demo"，绝不伪造实时数据。
+- query-meals 需真实门店编码（storeCode）+ 取餐方式；本实现通过 MCD_STORE_CODE 注入，
+  未配置时仍真实发起调用（服务端返回缺参数），由引擎离线兜底。
+- 口味维度是用「菜名 / 标签」推导的**启发式**，代码与文档均如实标注，不声称是官方口味标签。
 """
 from __future__ import annotations
 
@@ -20,8 +28,9 @@ from typing import Optional
 
 logger = logging.getLogger("taste-memory.mcd_client")
 
-MCD_MCP_URL = "https://mcp.mcd.cn"
-MCD_TIMEOUT = 4.0  # 拉取实时菜单的墙钟预算（秒）
+MCD_MCP_URL = "https://mcp.mcd.cn"   # 根路径 POST（诊断确认 200；非 /mcp）
+MCD_TIMEOUT = 8.0
+MCD_PROTOCOL = "2024-11-05"
 
 # 口味维度启发式：基于麦当劳菜名 / 标签关键词推断（非官方口味标签，仅供参考）
 _TASTE_HINTS = [
@@ -46,6 +55,10 @@ def _token() -> Optional[str]:
     return os.getenv("MCD_MCP_TOKEN") or os.getenv("MCD_TOKEN")
 
 
+def _store_code() -> Optional[str]:
+    return os.getenv("MCD_STORE_CODE") or os.getenv("MCD_STORECODE")
+
+
 def guess_dims(name: str, tags: list) -> dict:
     """用菜名 + 标签推导口味维度强度（启发式，1–5）。"""
     text = (name or "") + " " + " ".join(tags or [])
@@ -68,116 +81,149 @@ def guess_allergens(name: str) -> list:
     return found
 
 
-def normalize_meals(meals_payload: object, nutrition_payload: object = None) -> list:
-    """把麦当劳 MCP 返回的菜单/营养 JSON 归一化为菜品结构列表。
+def _parse_original_response(text: str) -> Optional[dict]:
+    """从 'API Response Information' 包装文本里提取 `## Original Response` 后的真实 JSON。
 
-    返回 ``[{"name", "dims", "tags", "ingredients", "allergens"}]``。
-    解析失败时抛出，由上层捕获后回退离线目录。
+    麦当劳 MCP 把后端 API 响应包成 LLM 可读文本 + 末尾 `## Original Response\\n{...}`，
+    业务数据（菜单）就在这个 JSON 里。
     """
+    if not isinstance(text, str):
+        return None
+    m = re.search(r"##\s*Original Response\s*\n(.*)", text, re.DOTALL)
+    block = m.group(1).strip() if m else text.strip()
+    try:
+        return json.loads(block)
+    except Exception:
+        s, e = block.find("{"), block.rfind("}")
+        if s != -1 and e != -1:
+            try:
+                return json.loads(block[s:e + 1])
+            except Exception:
+                return None
+    return None
+
+
+def normalize_meals(raw: object) -> list:
+    """把 query-meals 的真实响应（已解析 dict 或包装文本）归一化为菜品结构列表。
+
+    返回 ``[{"name", "dims", "tags", "ingredients", "allergens", "price", "original_price"}]``。
+    真实结构（实测）：data.categories[].meals[].code/tags + data.meals[code].name/价格 + data.frequent。
+    """
+    data = raw
+    if isinstance(raw, str):
+        data = _parse_original_response(raw)
+    if not isinstance(data, dict):
+        return []
+    payload = data.get("data") or {}
+    if not isinstance(payload, dict):
+        return []
+    categories = payload.get("categories") or []
+    meals_map = payload.get("meals") or {}
+    frequent = payload.get("frequent") or {}
+
     items: list = []
-    names: list = []
+    seen: set = set()
 
-    meals = _as_json(meals_payload)
-    # 兼容两种常见结构：列表 / 含 items 或 data 字段的对象
-    if isinstance(meals, list):
-        raw_list = meals
-    elif isinstance(meals, dict):
-        raw_list = meals.get("items") or meals.get("data") or meals.get("meals") or []
-    else:
-        raw_list = []
+    for cat in categories:
+        if not isinstance(cat, dict):
+            continue
+        for meal in cat.get("meals") or []:
+            if not isinstance(meal, dict):
+                continue
+            code = meal.get("code")
+            if not code:
+                continue
+            detail = meals_map.get(code) or {}
+            name = detail.get("name") if isinstance(detail, dict) else None
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            tags = list(meal.get("tags") or []) + list(detail.get("tags") or [])
+            items.append({
+                "name": name,
+                "dims": guess_dims(name, tags),
+                "tags": tags,
+                "ingredients": [],
+                "allergens": guess_allergens(name),
+                "price": detail.get("currentPrice"),
+                "original_price": detail.get("originalPrice"),
+            })
 
-    for entry in raw_list:
-        if isinstance(entry, str):
-            names.append(entry)
-        elif isinstance(entry, dict):
-            nm = entry.get("name") or entry.get("dishName") or entry.get("title") or entry.get("itemName")
-            if nm:
-                names.append(nm)
-                items.append({
-                    "name": nm,
-                    "dims": guess_dims(nm, entry.get("tags") or []),
-                    "tags": entry.get("tags") or [],
-                    "ingredients": entry.get("ingredients") or [],
-                    "allergens": guess_allergens(nm),
-                })
-
-    # 若解析不到结构化条目，但拿到了名称字符串，至少用名称构造候选
-    for nm in names:
-        if not any(i["name"] == nm for i in items):
+    # 常点餐品（frequent）可能含 name
+    if isinstance(frequent, dict):
+        nm = frequent.get("name")
+        if nm and nm not in seen:
+            seen.add(nm)
+            tags = list(frequent.get("tags") or [])
             items.append({
                 "name": nm,
-                "dims": guess_dims(nm, []),
-                "tags": [],
+                "dims": guess_dims(nm, tags),
+                "tags": tags,
                 "ingredients": [],
                 "allergens": guess_allergens(nm),
+                "price": frequent.get("currentPrice"),
+                "original_price": frequent.get("originalPrice"),
             })
     return items
 
 
-def _as_json(payload: object):
-    if payload is None:
-        return None
-    if isinstance(payload, (dict, list)):
-        return payload
-    if isinstance(payload, str):
-        try:
-            return json.loads(payload)
-        except (ValueError, TypeError):
-            return None
-    # MCP TextContent / 其他对象：尝试取 .text
-    text = getattr(payload, "text", None)
-    if isinstance(text, str):
-        try:
-            return json.loads(text)
-        except (ValueError, TypeError):
-            return None
-    return None
-
-
-def _extract_text(result) -> Optional[str]:
-    """从 MCP call_tool 的返回结果里取出首个文本块。"""
-    content = getattr(result, "content", None)
-    if isinstance(content, list):
-        for block in content:
-            txt = getattr(block, "text", None)
-            if isinstance(txt, str):
-                return txt
-    if isinstance(result, str):
-        return result
-    return None
-
-
-async def _fetch_live() -> list:
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
+async def _fetch_live(store_code: Optional[str]) -> list:
+    import httpx
 
     token = _token()
     if not token:
         return []
-    headers = {"Authorization": f"Bearer {token}"}
-    async with streamable_http_client(MCD_MCP_URL, headers=headers) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            meals_result = await session.call_tool("query-meals", {})
-            nutrition_result = None
-            try:
-                nutrition_result = await session.call_tool("list-nutrition-foods", {})
-            except Exception as e:  # 营养接口可选，失败不影响菜单推荐
-                logger.warning("list-nutrition-foods 调用失败，仅用菜单: %s", e)
-            meals_text = _extract_text(meals_result)
-            nutrition_text = _extract_text(nutrition_result) if nutrition_result else None
-            items = normalize_meals(meals_text, nutrition_text)
-            if not items:
-                raise ValueError("麦当劳 MCP 未返回可解析的菜单条目")
-            return items
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    args: dict = {}
+    if store_code:
+        args["storeCode"] = store_code
+        args["orderType"] = 1   # 1-到店
+        args["beType"] = 1      # 1-到店取餐（无需 beCode；外送场景才需 beCode）
+
+    async with httpx.AsyncClient(headers=headers, timeout=MCD_TIMEOUT) as c:
+        init = await c.post(MCD_MCP_URL, json={
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": MCD_PROTOCOL, "capabilities": {},
+                "clientInfo": {"name": "taste-memory", "version": "1.0.0"},
+            },
+        })
+        if init.status_code != 200:
+            raise RuntimeError(f"initialize 失败: HTTP {init.status_code}")
+        resp = await c.post(MCD_MCP_URL, json={
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "query-meals", "arguments": args},
+        })
+        result = resp.json().get("result", {})
+        text = ""
+        if result.get("content"):
+            text = result["content"][0].get("text", "")
+
+        # 业务失败判定：structuredContent 或 Original Response 里的 success=false
+        sc = result.get("structuredContent")
+        if isinstance(sc, dict) and sc.get("success") is False:
+            raise ValueError(f"query-meals 业务失败: code={sc.get('code')} msg={sc.get('message')}")
+        parsed = _parse_original_response(text)
+        if isinstance(parsed, dict) and parsed.get("success") is False:
+            raise ValueError(f"query-meals 业务失败: {parsed.get('message')}")
+
+        items = normalize_meals(parsed if parsed else text)
+        if not items:
+            raise ValueError("麦当劳 MCP 未返回可解析的菜单条目")
+        return items
 
 
-def get_live_menu() -> Optional[list]:
+def get_live_menu(store_code: Optional[str] = None) -> Optional[list]:
     """同步入口：成功返回真实麦当劳菜品列表，否则返回 None（调用方透明回退离线目录）。"""
+    sc = store_code or _store_code()
     if not _token():
         return None
     try:
-        return asyncio.run(asyncio.wait_for(_fetch_live(), timeout=MCD_TIMEOUT))
-    except Exception as e:  # 连接/鉴权/超时/解析任一失败都视为不可用
+        return asyncio.run(asyncio.wait_for(_fetch_live(sc), timeout=MCD_TIMEOUT))
+    except Exception as e:  # 连接/鉴权/参数缺失/超时/解析任一失败都视为不可用
         logger.warning("麦当劳 MCP 拉取失败，回退离线目录: %s", e)
         return None

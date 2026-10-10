@@ -60,12 +60,12 @@ description: 当用户提到"今天吃什么""推荐个菜""记录这顿饭""我
 
 ## 与麦当劳 MCP 的协作（真实数据来源）
 
-本 Skill 的推荐结果**真实来自麦当劳 MCP**：当 WorkBuddy 已启用 `mcd-mcp` 连接器且配置了 `MCD_MCP_TOKEN` 时，
-推荐引擎会调用 `query-meals`（实时菜单）与 `list-nutrition-foods`（营养），结合本 Skill 的口味档案做个性化筛选。
+本 Skill 的推荐结果**真实来自麦当劳 MCP**：当 WorkBuddy 已启用 `mcd-mcp` 连接器、配置了 `MCD_MCP_TOKEN`，
+且通过 `MCD_STORE_CODE` 提供门店编码时，推荐引擎会调用 `query-meals`（实时菜单，需门店编码）结合本 Skill 的口味档案做个性化筛选。
 
-- 推荐前若需要最新门店菜单/优惠，可先让 Agent 调用 mcd-mcp 的 `query-meals` / `available-coupons` / `campaign-calendar`，再交由本 Skill 推荐。
-- 未连接麦当劳 MCP 时，推荐工具返回 `data_source="offline_demo"`（离线示例目录），**不会**把离线数据伪装成实时麦当劳数据。
-- 点餐/优惠/活动类动作由 mcd-mcp 负责（如 `calculate-price` / `create-order`），不在本 Skill 内重复实现。
+- 调用方式为原生 JSON-RPC（`initialize` + `tools/call` 打到 `https://mcp.mcd.cn`），因为 mcp SDK 的 SSE 流封装在 `GET /` 会被 403。详见 `MCP_INTEGRATION.md`。
+- 未配置 Token 或门店编码时，推荐工具返回 `data_source="offline_demo"`（离线示例目录），**不会**把离线数据伪装成实时麦当劳数据。
+- 点餐/优惠/活动类动作由 mcd-mcp 负责（如 `available-coupons` / `auto-bind-coupons` / `query-order`），不在本 Skill 内重复实现。
 
 详见仓库根 `MCP_INTEGRATION.md`。
 
