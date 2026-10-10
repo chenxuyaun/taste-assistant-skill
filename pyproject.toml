@@ -1,0 +1,18 @@
+[project]
+name = "taste-memory-skill"
+version = "0.1.0"
+description = "Personal taste assistant MCP skill (loop-safe tool boundaries)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=2.0.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0.0"]
+
+[tool.pytest.ini_options]
+# 测试从项目根运行；把 skill 目录加入 path，使 `import core / storage / ...` 可用
+testpaths = [".claude/skills/taste-memory-skill/tests"]
+pythonpath = [".claude/skills/taste-memory-skill"]
+addopts = "-q"

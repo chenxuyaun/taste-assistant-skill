@@ -1,0 +1,26 @@
+# ===== 敏感配置（含 Token，绝不提交） =====
+.env
+.env.*
+!.env.example
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# ===== 本地数据库（运行时生成） =====
+*.db
+*.sqlite
+*.sqlite3
+.smoke_test.db
+.test_run.db
+.dbg.db
+.final.db
+
+# ===== 系统/编辑 =====
+.DS_Store
+Thumbs.db
+*.swp
