@@ -1,0 +1,27 @@
+# 敏感配置（含 Token，绝不进镜像）
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# 本地数据库 / 缓存
+*.db
+*.sqlite
+*.sqlite3
+demo/demo_run.db
+.pytest_cache/
+
+# Git
+.git/
+.gitignore
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+*.swp

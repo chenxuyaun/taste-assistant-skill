@@ -149,3 +149,29 @@ cd .claude/skills/taste-memory-skill
 
 本项目为麦当劳程序员节创意开发大赛参赛作品，由参赛者独立开发，**非麦当劳官方产品**。
 餐品信息、价格及供应状态以麦当劳官方渠道实时结果为准；输出不构成医疗、营养或专业建议。
+
+---
+
+## Demo 一键运行（录屏 / 自测）
+
+```bash
+cd taste-assistant-skill
+# 可选：在仓库根 .env 配置 MCD_MCP_TOKEN，启用真实麦当劳实时菜单
+python demo/run_demo.py
+```
+
+脚本跑通完整链路：定位最近门店 → 拉取菜单 → 空档案引导记录 → 记录触发隐式学习 → 推荐 Top3 → 展示权重变化 → 连续辣菜触发 streak 奖励 → 再次推荐展示「学到了」。未配置 Token 时自动走 `offline_demo`，逻辑完全一致，结果如实标注。
+
+---
+
+## Docker 运行（比赛「可运行交付物」口径）
+
+```bash
+docker build -t taste-memory .
+docker run --rm \
+  -e MCD_MCP_TOKEN=你的真实Token \
+  -e MCD_CITY=成都市 -e MCD_KEYWORD=春熙路 \
+  taste-memory
+```
+
+镜像不含任何 Token / 凭据（`.dockerignore` 已排除 `.env`）；Token 通过 `-e` 或 `--env-file` 注入。启动即拉起 MCP Server。

@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests (pytest)
+        # 不注入真实 Token：测试默认走 offline_demo，MCP 集成用 monkeypatch 模拟；
+        # 真 Token 仅用于本地/demo，绝不进 CI。
+        env:
+          MCD_MCP_TOKEN: ""
+          MCD_STORE_CODE: ""
+        run: pytest
