@@ -5,7 +5,7 @@
 **麦味记忆** 是一个个人口味助手 Skill：它记住你的口味偏好、饮食限制与用餐历史，并结合**麦当劳 MCP 的实时菜单与营养数据**，给出真正个性化的麦当劳点餐推荐——而不是千篇一律的菜谱列表。
 
 - 隐私优先：口味档案默认存**本地 SQLite**，不上云、不联网、不存任何凭据。
-- 真实使用麦当劳 MCP：配置 Token 且提供门店编码（`MCD_STORE_CODE`）后，推荐候选集来自 `query-meals` 实时菜单；未配置时透明回退离线目录并如实标注（详见 `MCP_INTEGRATION.md`）。
+- 真实使用麦当劳 MCP：配置 Token 后，推荐候选集来自 `query-meals` 实时菜单。门店可二选一指定：显式 `MCD_STORE_CODE`，或配 `MCD_CITY`+`MCD_KEYWORD` 自动定位最近门店；未配置时透明回退离线目录并如实标注（详见 `MCP_INTEGRATION.md`）。
 - 防死循环设计：停止条件 / 超时 / 幂等 / 降级都在工具边界上做硬，让驱动它的 Agent 不乱调、不空转。
 
 ---
@@ -17,7 +17,7 @@
 | 名称 | 麦味记忆（McDonald's Taste Memory Skill） |
 | 类型 | MCP 工具集（9 个工具）+ 本地记忆层 + 推荐引擎 |
 | 核心能力 | 记录用餐、学习口味、饮食限制管理、个性化麦当劳推荐、周菜单、食材替代 |
-| 数据来源 | 用户本地口味档案 + 麦当劳 MCP 实时菜单/营养（live）/ 离线示例（fallback） |
+| 数据来源 | 用户本地口味档案 + 麦当劳 MCP 实时菜单（live，支持按城市+地标自动定位最近门店）/ 离线示例（fallback） |
 | 技术栈 | Python ≥ 3.11、fastmcp、pydantic v2、SQLite |
 | 运行形态 | 既可作为独立 MCP Server（`python main.py`），也可作为 WorkBuddy Skill 被 Agent 调用 |
 
@@ -38,7 +38,7 @@ taste-assistant-skill/
     ├── storage/                   # SQLite 建表 + CRUD + 隐式偏好学习
     ├── recommend/                 # 推荐引擎 + mcd_client（麦当劳 MCP 客户端）
     ├── tools/                     # 9 个 MCP 工具实现
-    └── tests/                     # pytest，32 用例全过
+    └── tests/                     # pytest，36 用例全过
 ```
 
 ---
@@ -53,7 +53,7 @@ python -m venv .venv
 .venv/Scripts/python.exe -m pip install -r requirements.txt   # 或：fastmcp pydantic pytest
 ```
 
-> `requirements.txt` 内容：`fastmcp>=2.0.0`、`pydantic>=2.0.0`、`pytest>=8.0.0`。
+> `requirements.txt` 内容：`fastmcp>=2.0.0`、`pydantic>=2.0.0`、`python-dotenv>=1.0.0`、`httpx>=0.28.0`、`pytest>=8.0.0`。
 
 ### 2. 配置麦当劳 MCP Token（推荐，启用实时菜单）
 
@@ -140,7 +140,7 @@ export MCD_MCP_TOKEN="你的_真实_Token"   # Windows: set MCD_MCP_TOKEN=...
 
 ```bash
 cd .claude/skills/taste-memory-skill
-.venv/Scripts/python.exe -m pytest     # 32 用例全过（含 AC1–AC5 与防循环用例）
+.venv/Scripts/python.exe -m pytest     # 36 用例全过（含 AC1–AC5 与防循环用例）
 ```
 
 ---

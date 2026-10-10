@@ -29,13 +29,13 @@ WorkBuddy 先读取项目目录与 GitHub 仓库，发现仓库为空——于�
 
 ### 阶段 2 · 测试与验证
 WorkBuddy 在受管 venv 安装依赖并跑 pytest：先遇清华镜像缺包（改用官方 PyPI）、async 测试需
-`asyncio.run`、关键词规则「麻婆豆腐→麻」误判等，逐一定位修复。最终 **32 用例全过**，9/9 工具注册成功。
+`asyncio.run`、关键词规则「麻婆豆腐→麻」误判等，逐一定位修复。最终 **36 用例全过**，9/9 工具注册成功。
 
 ### 阶段 3 · 参赛文件生成（本次任务）
 用户要求「阅读参赛说明，生成必要文件」。WorkBuddy 抓取比赛仓库 README / 活动规则 /
 `CONTEST_DECLARATION.md`（原样抄）/ 麦当劳 MCP Server 工具清单，识别出硬门槛「必须真实使用麦当劳 MCP」。
-为此**真把麦当劳 MCP 接进推荐引擎**（`recommend/mcd_client.py`：Streamable HTTP 连接 `https://mcp.mcd.cn`，
-调 `query-meals`（需门店编码，经 `MCD_STORE_CODE` 注入），8s 超时回退，离线结果明确标注 `offline_demo` 绝不伪造），
+为此**真把麦当劳 MCP 接进推荐引擎**（`recommend/mcd_client.py`：原生 JSON-RPC 连接 `https://mcp.mcd.cn`，
+调 `query-meals`（实时菜单）+ `query-nearby-stores`（按城市+地标自动定位最近门店）+ `list-nutrition-foods`（营养，当前 Token 返回空），8s 超时回退，离线结果明确标注 `offline_demo` 绝不伪造），
 并补齐比赛必交文件：
 - `README.md`（项目介绍/安装/使用示例/目标用户）
 - `CONTEST_DECLARATION.md`（官方声明，内容不可改）
@@ -57,5 +57,5 @@ WorkBuddy 在受管 venv 安装依赖并跑 pytest：先遇清华镜像缺包（
 cd taste-assistant-skill/.claude/skills/taste-memory-skill
 export MCD_MCP_TOKEN="<你的Token>"      # 启用实时麦当劳菜单
 python main.py                          # 启动 MCP Server
-pytest                                  # 运行 32 个测试
+pytest                                  # 运行 36 个测试
 ```

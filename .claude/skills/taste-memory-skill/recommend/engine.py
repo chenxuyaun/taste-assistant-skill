@@ -57,21 +57,31 @@ def _profile_or_raise() -> dict:
     return p
 
 
-def get_menu_source() -> tuple[list, str]:
-    """返回 (菜品列表, 数据来源)。
+def get_menu_source() -> tuple[list, str, Optional[dict]]:
+    """返回 (菜品列表, 数据来源, 定位门店信息)。
 
     - ``"mcd_mcp"``：来自麦当劳 MCP 的实时菜单（已配置 MCD_MCP_TOKEN 且连接成功）。
+      若未显式配置 MCD_STORE_CODE，会自动基于 MCD_CITY+MCD_KEYWORD 定位最近门店。
     - ``"offline_demo"``：离线示例目录（未连接麦当劳 MCP 时透明回退，结果如实标注）。
     绝不把离线目录伪装成实时麦当劳数据。
     """
     try:
         from recommend import mcd_client
-        live = mcd_client.get_live_menu()
-        if live:
-            return live, "mcd_mcp"
+        if mcd_client._token():
+            items, store_info = mcd_client.get_live_menu_with_store()
+            if items:
+                return items, "mcd_mcp", store_info
     except Exception as e:  # 极端情况下连导入都失败，安全回退
         logger.warning("麦当劳 MCP 不可用，回退离线目录: %s", e)
-    return DISH_CATALOG, "offline_demo"
+    return DISH_CATALOG, "offline_demo", None
+
+
+def _store_hint(store_info: Optional[dict]) -> Optional[str]:
+    if not store_info or not store_info.get("store_name"):
+        return None
+    d = store_info.get("distance")
+    dtext = f"（距你约 {d} 米）" if isinstance(d, (int, float)) else ""
+    return f"已基于「{store_info['store_name']}」{dtext}的实时菜单推荐"
 
 
 def dominant(dish: dict) -> Optional[str]:
@@ -131,7 +141,7 @@ def recommend_dish_sync(
     avoid = set(profile["avoid_foods"])
     recent = set() if include_recent else set(db.get_recent_dish_names(RECENT_DAYS))
 
-    catalog, source = get_menu_source()
+    catalog, source, store_info = get_menu_source()
     candidates = []
     for dish in catalog:
         name = dish["name"]
@@ -159,7 +169,8 @@ def recommend_dish_sync(
     if source == "offline_demo":
         return ToolResult(ToolStatus.OK, data=out, data_source="offline_demo",
                           hint="当前未连接麦当劳 MCP，以下为离线示例菜品；配置 MCD_MCP_TOKEN 后将基于实时菜单推荐")
-    return ToolResult(ToolStatus.OK, data=out, data_source="mcd_mcp")
+    store_hint = _store_hint(store_info)
+    return ToolResult(ToolStatus.OK, data=out, data_source="mcd_mcp", hint=store_hint)
 
 
 def _scene_for_day(day: int) -> str:
@@ -171,7 +182,7 @@ def generate_weekly_menu_sync(days: int = 7, diversityLevel: int = 2) -> ToolRes
         return ToolResult(ToolStatus.EMPTY_NEEDS_INPUT, data=[],
                           hint="请先记录几餐或设置口味档案，再生成周菜单")
     profile = _profile_or_raise()
-    raw_catalog, source = get_menu_source()
+    raw_catalog, source, store_info = get_menu_source()
     catalog = [
         d for d in raw_catalog
         if not (set(profile["allergens"]) & set(d.get("allergens", [])))
@@ -204,7 +215,8 @@ def generate_weekly_menu_sync(days: int = 7, diversityLevel: int = 2) -> ToolRes
     if source == "offline_demo":
         return ToolResult(ToolStatus.OK, data=menu, data_source="offline_demo",
                           hint="当前未连接麦当劳 MCP，以下为离线示例菜单；配置 MCD_MCP_TOKEN 后将基于实时菜单生成")
-    return ToolResult(ToolStatus.OK, data=menu, data_source="mcd_mcp")
+    store_hint = _store_hint(store_info)
+    return ToolResult(ToolStatus.OK, data=menu, data_source="mcd_mcp", hint=store_hint)
 
 
 def suggest_substitute_sync(originalIngredient: str, reason: str = "") -> ToolResult:

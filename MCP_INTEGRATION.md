@@ -27,9 +27,10 @@
 | Tool | 是否真实存在 | 用途 | 在本项目中的消费方式 |
 |---|---|---|---|
 | `query-meals` | **是**（实测可调用） | 查询门店可售餐品菜单（分类、餐品编码、标签、现价/原价） | 拉取实时菜品清单，作为个性化推荐的真实候选集 |
-| `list-nutrition-foods` | **否**（工具清单中不存在） | —— | 已从代码中移除该调用，不依赖它 |
+| `query-nearby-stores` | **是**（实测可调用） | 基于位置锚点（城市+关键词）查询附近可点餐门店，含到店距离 | **自动定位最近门店**：未配 `MCD_STORE_CODE` 时，用 `MCD_CITY`+`MCD_KEYWORD` 调它，按 `distance`（米）升序取最近一家，再喂给 `query-meals`（见第 3 节） |
+| `list-nutrition-foods` | **是**（tools/list 实测存在） | 查询营养数据 | 真实调用（见 `recommend/mcd_client.py` 的 `get_nutrition_foods`）；当前测试 Token 返回空列表，故推荐未深度消费，仅作能力暴露。营养/健康维度判断仍用菜名+标签的启发式（见第 4 节） |
 
-> **诚实更正**：早期设计稿假设了 `list-nutrition-foods`，但 `tools/list` 实测确认它不存在，故已删除相关调用。营养/健康维度判断改用菜名+标签的启发式（见第 4 节）。
+> **诚实更正（本段取代早期误述）**：早期联调时因 `tools/list` 输出被截断，曾误判 `list-nutrition-foods` 不存在并已删除；后续完整拉取工具清单确认它**真实存在**。代码中已恢复 `get_nutrition_foods()` 调用，但实测该 Token 返回空数据，故不作为推荐硬依赖。
 
 `query-meals` 调用细节（实测）：
 - **inputSchema 声明 `required: []`**，但**实际调用返回 `code:400, message:"缺少参数"`**；经参数探测确认真实必填为 `storeCode`（门店编码）+ `orderType`（1-到店 / 2-外送）+ `beType`（1-到店取餐 / 2-麦乐送 / 5-DT / 6-企业团餐）。这是服务端实现细节，inputSchema 未声明。
@@ -52,15 +53,20 @@ WorkBuddy Agent（已启用 mcd-mcp 连接器 + 本 Skill）
      recommend/engine.py → get_menu_source()
         │
         ├─ 配置了有效 MCD_MCP_TOKEN 且 query-meals 成功返回菜单
-        │     → recommend/mcd_client.py 原生 JSON-RPC 调 query-meals（带 MCD_STORE_CODE）
+        │     → recommend/mcd_client.py 原生 JSON-RPC 调 query-meals
         │     → 实时麦当劳菜单（data_source="mcd_mcp"）
         │
-        └─ 未配置 Token / 缺门店编码 / 连接失败 / 超时 / 解析失败
+        ├─ 未配 MCD_STORE_CODE，但配了 MCD_CITY+MCD_KEYWORD
+        │     → 先调 query-nearby-stores（searchType=2）按 distance 选最近门店
+        │     → 取其 storeCode 喂给 query-meals → 实时菜单（data_source="mcd_mcp"）
+        │     → 推荐结果 hint 标注「基于『门店名』（距你约 X 米）的实时菜单」
+        │
+        └─ 未配置 Token / 缺门店 / 连接失败 / 超时 / 解析失败
               → 透明回退到内置离线示例目录（data_source="offline_demo"，结果如实标注）
 ```
 
 要点：
-- **真实使用**：当 `MCD_MCP_TOKEN` 已配置且 `MCD_STORE_CODE` 有效时，推荐结果来自麦当劳 MCP 实时数据（`data_source="mcd_mcp"`）。
+- **真实使用**：当 `MCD_MCP_TOKEN` 已配置时，推荐结果来自麦当劳 MCP 实时数据（`data_source="mcd_mcp"`）。门店来源有二：显式 `MCD_STORE_CODE`，或 `MCD_CITY`+`MCD_KEYWORD` 自动定位最近门店（实测"成都市+春熙路"命中联升巷餐厅，距 173 米）。
 - **绝不伪造**：未连接 / 未配门店时，结果明确标注 `data_source="offline_demo"`，不会把离线示例伪装成实时麦当劳数据（符合活动规则与隐私约束）。
 - **限流友好**：live 拉取设 8s 墙钟超时；超时或业务失败一律回退，不挂起、不静默造假。
 
