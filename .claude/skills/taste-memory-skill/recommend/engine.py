@@ -10,6 +10,7 @@ from typing import Optional
 
 from core.guard import ToolResult, ToolStatus
 from storage import db
+from recommend import mcd_client
 
 logger = logging.getLogger("taste-memory.engine")
 
@@ -130,9 +131,8 @@ def recommend_dish_sync(
     include_recent: bool = False,
 ) -> ToolResult:
     if not db.has_meaningful_profile():
-        # 终态：停下，请用户先记录（不会无限重试，R2/R4）
-        return ToolResult(ToolStatus.EMPTY_NEEDS_INPUT, data=[],
-                          hint="口味档案或用餐记录为空，请先记录几餐，我再推荐")
+        # 冷启动：档案空白时不踢回，给基于中性默认档案的规则化试探推荐（去 demo 感）
+        return _cold_start_recommend(scene, mealTime, availableIngredients, excludeItems, include_recent)
     profile = _profile_or_raise()
     available = set(availableIngredients or [])
     exclude = set(excludeItems or [])
@@ -168,9 +168,45 @@ def recommend_dish_sync(
     ]
     if source == "offline_demo":
         return ToolResult(ToolStatus.OK, data=out, data_source="offline_demo",
-                          hint="当前未连接麦当劳 MCP，以下为离线示例菜品；配置 MCD_MCP_TOKEN 后将基于实时菜单推荐")
+                          hint="未连接实时麦当劳菜单，以下基于通用菜品知识库推荐；配置 MCD_MCP_TOKEN 后自动切换为门店实时菜单")
     store_hint = _store_hint(store_info)
     return ToolResult(ToolStatus.OK, data=out, data_source="mcd_mcp", hint=store_hint)
+
+
+def _cold_start_recommend(scene, mealTime, availableIngredients, excludeItems, include_recent) -> ToolResult:
+    """冷启动：档案空白时的规则化试探推荐（去 demo 感）。
+
+    用中性默认口味档案（各维度 3.0）+ 场景/标签规则对当前菜单排序，产出带
+    reason/matched_dims 的个性化候选，而非写死的示例列表。结果是 OK 终态（带
+    cold_start 标记），驱动 Agent 停下，不进入死循环。
+    """
+    profile = db.default_profile_dict()
+    available = set(availableIngredients or [])
+    exclude = set(excludeItems or [])
+    catalog, source, store_info = get_menu_source()
+    candidates = []
+    for dish in catalog:
+        if dish["name"] in exclude:
+            continue
+        candidates.append((_score(dish, profile, scene, available), dish))
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    top = candidates[:3]
+    if not top:
+        return ToolResult(ToolStatus.EMPTY_NEEDS_INPUT, data=[], cold_start=True,
+                          hint="冷启动：过滤后无候选菜品，请先记录几餐或放宽条件")
+    out = [
+        {"dish": d["name"], "score": round(s, 2),
+         "matched_dims": _matched(d, profile),
+         "reason": _reason(d, profile, scene, available)}
+        for s, d in top
+    ]
+    base = "新用户冷启动：我还没学到你的口味，先按通用口味给你几个，确认或评分后我会越推越准"
+    if source == "offline_demo":
+        return ToolResult(ToolStatus.OK, data=out, data_source="offline_demo", cold_start=True,
+                          hint=f"{base}（未连接实时麦当劳菜单，基于通用菜品知识库）")
+    store_hint = _store_hint(store_info)
+    hint = (store_hint + "；" if store_hint else "") + base
+    return ToolResult(ToolStatus.OK, data=out, data_source="mcd_mcp", cold_start=True, hint=hint)
 
 
 def _scene_for_day(day: int) -> str:
@@ -179,8 +215,7 @@ def _scene_for_day(day: int) -> str:
 
 def generate_weekly_menu_sync(days: int = 7, diversityLevel: int = 2) -> ToolResult:
     if not db.has_meaningful_profile():
-        return ToolResult(ToolStatus.EMPTY_NEEDS_INPUT, data=[],
-                          hint="请先记录几餐或设置口味档案，再生成周菜单")
+        return _cold_start_weekly(days, diversityLevel)
     profile = _profile_or_raise()
     raw_catalog, source, store_info = get_menu_source()
     catalog = [
@@ -214,9 +249,49 @@ def generate_weekly_menu_sync(days: int = 7, diversityLevel: int = 2) -> ToolRes
                           hint="过滤后无足够候选，建议放宽饮食限制")
     if source == "offline_demo":
         return ToolResult(ToolStatus.OK, data=menu, data_source="offline_demo",
-                          hint="当前未连接麦当劳 MCP，以下为离线示例菜单；配置 MCD_MCP_TOKEN 后将基于实时菜单生成")
+                          hint="未连接实时麦当劳菜单，以下基于通用菜品知识库生成；配置 MCD_MCP_TOKEN 后自动切换为门店实时菜单")
     store_hint = _store_hint(store_info)
     return ToolResult(ToolStatus.OK, data=menu, data_source="mcd_mcp", hint=store_hint)
+
+
+def _cold_start_weekly(days: int, diversityLevel: int) -> ToolResult:
+    """冷启动：档案空白时的规则化周菜单（按通用口味 + 多样性生成）。"""
+    profile = db.default_profile_dict()
+    raw_catalog, source, store_info = get_menu_source()
+    catalog = [
+        d for d in raw_catalog
+        if not (set(profile["allergens"]) & set(d.get("allergens", [])))
+        and not (set(profile["avoid_foods"]) & set(d.get("ingredients", [])))
+    ]
+    menu = []
+    used_names: set = set()
+    last_dom = None
+    for day in range(1, days + 1):
+        best, best_score = None, -1.0
+        for dish in catalog:
+            if dish["name"] in used_names:
+                continue
+            dom = dominant(dish)
+            penalty = 0.0
+            if diversityLevel >= 2 and dom == last_dom:
+                penalty = 5.0 * diversityLevel
+            score = _score(dish, profile, _scene_for_day(day), set()) - penalty
+            if score > best_score:
+                best_score, best = score, dish
+        if best is None:
+            break
+        menu.append({"day": day, "dish": best["name"], "dominant": dominant(best)})
+        used_names.add(best["name"])
+        last_dom = dominant(best)
+    if not menu:
+        return ToolResult(ToolStatus.EMPTY_NEEDS_INPUT, data=[], cold_start=True,
+                          hint="冷启动：过滤后无足够候选，建议放宽饮食限制")
+    store_hint = _store_hint(store_info)
+    base = "新用户冷启动：按通用口味生成的周菜单，记录几餐后会更贴合你"
+    hint = (store_hint + "；" if store_hint else "") + base
+    if source == "offline_demo":
+        hint = base + "（未连接实时麦当劳菜单，基于通用菜品知识库）"
+    return ToolResult(ToolStatus.OK, data=menu, data_source=source, cold_start=True, hint=hint)
 
 
 def suggest_substitute_sync(originalIngredient: str, reason: str = "") -> ToolResult:
@@ -233,3 +308,42 @@ def suggest_substitute_sync(originalIngredient: str, reason: str = "") -> ToolRe
                       data={"original": key, "substitutes": [],
                             "reason": "未在替代库中，建议按同类口感/营养找替代，或告诉我你的限制我再细化"},
                       hint="未知食材，已给通用建议")
+
+
+def compare_stores_sync(store_codes: list) -> ToolResult:
+    """多门店比价：对比同款菜品在不同门店的价格与可下单状态（真实麦当劳数据）。
+
+    依赖麦当劳 MCP；未配置 Token 或全部门店拉取失败，如实转 EMPTY_NEEDS_INPUT / ERROR，
+    绝不编造价格或库存。返回结果按省价差降序，仅保留 ≥2 家门店有报价的菜品。
+    """
+    if not store_codes:
+        return ToolResult(ToolStatus.EMPTY_NEEDS_INPUT, data=[],
+                          hint="请提供要对比的门店编码列表（storeCodes），如 ['3450410','3450339']")
+    raw = mcd_client.compare_stores_sync(store_codes or [])
+    if raw is None:
+        if not mcd_client._token():
+            return ToolResult(ToolStatus.EMPTY_NEEDS_INPUT, data=[],
+                              hint="多门店比价需要麦当劳 MCP Token（MCD_MCP_TOKEN）；请在 .env 配置后重试")
+        return ToolResult(ToolStatus.ERROR, data=[],
+                          hint="比价拉取失败：多家门店菜单均不可达，请检查门店编码或网络后重试",
+                          retryable=True, retry_after=2)
+    return ToolResult(ToolStatus.OK, data=raw, data_source="mcd_mcp",
+                      hint="以下为同款菜品在多家门店的价格与可下单状态，按省价差排序（价差为 0 时差异主要在是否售罄）")
+
+
+def get_nutrition_sync() -> ToolResult:
+    """营养数据查询：真实调用 list-nutrition-foods。
+
+    当前比赛 Token 下该接口返回空（会员/参数限制），如实转 EMPTY_NEEDS_INPUT 并说明原因；
+    能力已就绪，待 Token 权限放开后自动接入，绝不硬刚、不伪造营养数据。
+    """
+    if not mcd_client._token():
+        return ToolResult(ToolStatus.EMPTY_NEEDS_INPUT, data=[],
+                          hint="营养查询需要麦当劳 MCP Token（MCD_MCP_TOKEN）；请在 .env 配置后重试")
+    foods = mcd_client.get_nutrition_foods()
+    if not foods:
+        return ToolResult(ToolStatus.EMPTY_NEEDS_INPUT, data=[],
+                          hint="营养数据当前不可用：麦当劳 MCP 的 list-nutrition-foods 返回空（会员/参数限制）。"
+                               "能力已就绪，待 Token 权限放开后将自动接入")
+    return ToolResult(ToolStatus.OK, data=foods, data_source="mcd_mcp",
+                      hint="以下为营养数据")

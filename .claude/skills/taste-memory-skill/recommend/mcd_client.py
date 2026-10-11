@@ -188,6 +188,7 @@ def normalize_meals(raw: object) -> list:
                 "allergens": guess_allergens(name),
                 "price": _to_float(detail.get("currentPrice")),
                 "original_price": _to_float(detail.get("originalPrice")),
+                "available": detail.get("canWithOrder"),
                 "image": detail.get("image"),
             })
 
@@ -203,6 +204,7 @@ def normalize_meals(raw: object) -> list:
                 "ingredients": [], "allergens": guess_allergens(nm),
                 "price": _to_float(frequent.get("currentPrice")),
                 "original_price": _to_float(frequent.get("originalPrice")),
+                "available": frequent.get("canWithOrder"),
                 "image": frequent.get("image"),
             })
     return items
@@ -368,3 +370,61 @@ def get_live_menu(store_code: Optional[str] = None) -> Optional[list]:
     """兼容入口：只返回菜品列表（忽略 store_info）。"""
     items, _ = get_live_menu_with_store(store_code)
     return items
+
+
+async def _gather_store_menus(store_codes: list) -> dict:
+    """并发拉多家门店菜单，返回 {store_code: items}（失败门店跳过并记录警告，不中断整体比价）。"""
+    async def _one(sc):
+        try:
+            items = await _fetch_live(sc)
+            return sc, items
+        except Exception as e:
+            logger.warning("门店 %s 菜单拉取失败，比价跳过: %s", sc, e)
+            return sc, None
+    pairs = await asyncio.gather(*[_one(sc) for sc in store_codes])
+    return {sc: items for sc, items in pairs if items}
+
+
+def compare_stores_sync(store_codes: list) -> Optional[list]:
+    """同步入口：对比多家门店同款菜品的价格与可下单状态。
+
+    返回 ``[{dish, prices:{store_code:{price,available}}, best_store, best_price, max_save}]``，
+    仅保留在 ≥2 家门店有报价的菜品（价差或售罄差异才有意义）。
+
+    依赖麦当劳 MCP 真实数据；未配置 Token 或全部门店拉取失败返回 None，由上层如实转 ERROR，不造假。
+    """
+    if not store_codes or not _token():
+        return None
+    try:
+        menus = asyncio.run(
+            asyncio.wait_for(_gather_store_menus(store_codes),
+                             timeout=MCD_TIMEOUT * max(1, len(store_codes)))
+        )
+    except Exception as e:
+        logger.warning("比价拉取失败，回退: %s", e)
+        return None
+    if not menus:
+        return None
+    by_dish: dict = {}
+    for sc, items in menus.items():
+        for it in items:
+            by_dish.setdefault(it["name"], {})[sc] = {
+                "price": it.get("price"),
+                "available": it.get("available"),
+            }
+    out = []
+    for dish, per_store in by_dish.items():
+        priced = {sc: v for sc, v in per_store.items() if isinstance(v.get("price"), (int, float))}
+        if len(priced) < 2:
+            continue  # 仅在 ≥2 家门店有报价时纳入比价
+        best = min(priced, key=lambda sc: priced[sc]["price"])
+        worst = max(priced, key=lambda sc: priced[sc]["price"])
+        out.append({
+            "dish": dish,
+            "prices": per_store,
+            "best_store": best,
+            "best_price": priced[best]["price"],
+            "max_save": round(priced[worst]["price"] - priced[best]["price"], 2),
+        })
+    out.sort(key=lambda x: x["max_save"], reverse=True)
+    return out

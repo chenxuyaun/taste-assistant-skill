@@ -32,6 +32,7 @@ class ToolResult:
     retry_after: Optional[int] = None
     fallback: Optional[str] = None
     data_source: Optional[str] = None
+    cold_start: bool = False
 
     def to_dict(self) -> dict:
         d: dict[str, Any] = {"status": self.status}
@@ -43,6 +44,8 @@ class ToolResult:
             d["hint"] = self.hint
         if self.data_source is not None:
             d["data_source"] = self.data_source
+        if self.cold_start:
+            d["cold_start"] = True
         if self.status == ToolStatus.ERROR:
             d["retryable"] = self.retryable
             if self.retry_after is not None:

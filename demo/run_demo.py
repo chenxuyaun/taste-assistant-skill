@@ -9,7 +9,7 @@
 
 演示链路：
   ① 定位 + 拉取菜单
-  ② 空档案推荐（应引导先记录，终态不重试）
+  ② 空档案冷启动推荐（OK + cold_start，规则化试探推荐，终态不重试）
   ③ 记录几餐，触发隐式学习
   ④ 再推荐（已有档案）
   ⑤ 展示口味权重变化
@@ -95,7 +95,7 @@ def main() -> None:
     print(f"  数据来源: {source}  候选菜品数: {len(catalog)}")
     print("  示例菜品:", "、".join(d["name"] for d in catalog[:5]), "…")
 
-    hr("② 用户：今天中午吃什么？ -> 推荐（空档案，应引导先记录，终态不重试）")
+    hr("② 用户：今天中午吃什么？ -> 冷启动推荐（空档案返回 OK+cold_start，规则化试探，终态不重试）")
     recommend("工作日午餐")
 
     hr("③ 用户：刚吃了几道菜（触发隐式学习）")
@@ -120,8 +120,17 @@ def main() -> None:
     hr("⑦ 第三轮推荐（展示「学到了」：辣味权重更高，辣菜更靠前）")
     recommend("工作日午餐")
 
+    hr("⑧ 多门店比价 / 营养查询（第三阶段新能力）")
+    cres = engine.compare_stores_sync(["3450410", "3450339"])
+    print(f"  [compare_stores] status={cres.status}  {('hint: ' + cres.hint) if cres.hint else ''}")
+    nres = engine.get_nutrition_sync()
+    print(f"  [get_nutrition] status={nres.status}  {('hint: ' + nres.hint) if nres.hint else ''}")
+    if cres.status == ToolStatus.OK:
+        for row in cres.data[:5]:
+            print(f"     {row['dish']}  最便宜门店: {row['best_store']} ¥{row['best_price']}  省¥{row['max_save']}")
+
     hr("Demo 结束 · 真实链路已跑通，录屏可直接用以上输出")
-    print("录屏建议：从 ① 开始到 ⑦ 结束，重点展示 ⑤⑥ 权重变化与 ⑦ 推荐排序变化。")
+    print("录屏建议：从 ① 开始到 ⑧ 结束，重点展示 ⑤⑥ 权重变化与 ⑦ 推荐排序变化；无 Token 时 ⑧ 会如实展示 EMPTY_NEEDS_INPUT 降级提示。")
 
 
 if __name__ == "__main__":

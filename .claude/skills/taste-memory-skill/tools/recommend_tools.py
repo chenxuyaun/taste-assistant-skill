@@ -67,3 +67,39 @@ async def suggest_substitute(originalIngredient: str, reason: str = "") -> dict:
                           retry_after=1, fallback="safe_default_profile").to_dict()
     except Exception as e:
         return ToolResult(ToolStatus.ERROR, hint=f"替代建议失败: {e}", retryable=False).to_dict()
+
+
+@mcp.tool()
+async def compare_stores(storeCodes: list) -> dict:
+    """多门店比价：对比同款菜品在多家门店的价格与可下单状态，按省价差排序。
+
+    仅保留在 ≥2 家门店有报价的菜品（价差或售罄差异才有意义）。依赖真实麦当劳 MCP；
+    未配置 Token 或拉取失败如实上报，绝不编造价格/库存。
+    """
+    try:
+        result = await with_timeout(
+            asyncio.to_thread(engine.compare_stores_sync, storeCodes),
+            config.COMPARE_TIMEOUT, "compare_stores",
+        )
+        return result.to_dict()
+    except TimeoutError as e:
+        return ToolResult(ToolStatus.ERROR, hint=str(e), retryable=True,
+                          retry_after=2, fallback="safe_default_profile").to_dict()
+    except Exception as e:
+        return ToolResult(ToolStatus.ERROR, hint=f"比价失败: {e}", retryable=False).to_dict()
+
+
+@mcp.tool()
+async def get_nutrition() -> dict:
+    """查询麦当劳营养数据（list-nutrition-foods）。当前比赛 Token 权限下可能返回空，如实上报，不伪造。"""
+    try:
+        result = await with_timeout(
+            asyncio.to_thread(engine.get_nutrition_sync),
+            config.READ_TIMEOUT, "get_nutrition",
+        )
+        return result.to_dict()
+    except TimeoutError as e:
+        return ToolResult(ToolStatus.ERROR, hint=str(e), retryable=True,
+                          retry_after=2, fallback="safe_default_profile").to_dict()
+    except Exception as e:
+        return ToolResult(ToolStatus.ERROR, hint=f"营养查询失败: {e}", retryable=False).to_dict()

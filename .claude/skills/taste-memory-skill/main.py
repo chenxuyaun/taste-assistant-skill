@@ -12,7 +12,13 @@ import sys
 # 未安装则退化为仅读取已 export 的环境变量，不影响其它功能。
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv()  # 先尝试从当前工作目录加载
+    # .env 实际位于仓库根（本 skill 通常在 <repo>/.claude/skills/taste-memory-skill/），
+    # 无论用户从哪个目录启动 main.py，都显式补加载仓库根的 .env，确保 Token 能被读到。
+    _skill_dir = os.path.dirname(os.path.abspath(__file__))
+    _repo_env = os.path.join(_skill_dir, "..", "..", "..", ".env")
+    if os.path.exists(_repo_env):
+        load_dotenv(_repo_env, override=False)
 except Exception:
     pass
 
